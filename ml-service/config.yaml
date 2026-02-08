@@ -1,0 +1,75 @@
+# 增强版ML服务配置
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  reload: false
+
+# NER服务配置
+ner:
+  # 中文模型
+  use_bert_chinese: false  # 是否使用BERT中文模型（需要下载）
+  chinese_bert_model: bert-base-chinese
+  
+  # 英文模型
+  use_transformer: true    # 使用spaCy transformer
+  english_model: en_core_web_trf  # 或 en_core_web_sm
+  
+  # Ontology
+  use_ontology: true
+  ontology_path: ontology_db
+
+# Embedding服务配置
+embedding:
+  default_model: all-MiniLM-L6-v2  # 轻量级模型
+  # 可选: all-MiniLM-L12-v2, all-mpnet-base-v2, bge-large-en, bge-large-zh, bge-m3
+  device: auto  # auto, cpu, cuda, mps
+  use_cache: true
+  normalize: true
+  cache_dir: embedding_cache
+
+# LLM服务配置
+llm:
+  default_model: gpt-4o-mini
+  default_provider: openai
+  use_cache: true
+  cache_size: 1000
+  cache_ttl: 3600
+  
+  # OpenAI配置
+  openai:
+    enabled: true
+    model: gpt-4o-mini
+    api_key: ""  # 从环境变量OPENAI_API_KEY读取
+    base_url: https://api.openai.com/v1
+    temperature: 0.7
+    max_tokens: 1024
+  
+  # Anthropic Claude配置
+  anthropic:
+    enabled: true
+    model: claude-3-haiku-20240307
+    api_key: ""  # 从环境变量ANTHROPIC_API_KEY读取
+    temperature: 0.7
+    max_tokens: 1024
+  
+  # Ollama本地模型配置
+  ollama:
+    enabled: true
+    model: llama3.2
+    base_url: http://localhost:11434
+    temperature: 0.7
+    max_tokens: 1024
+  
+  # Llama.cpp配置
+  llama_cpp:
+    enabled: false
+    model_path: ""  # GGUF模型文件路径
+    n_ctx: 4096
+    n_gpu_layers: 0
+  
+  # 智能路由配置
+  routing:
+    simple: ollama      # 简单任务用本地模型
+    moderate: ollama    # 中等任务用本地模型
+    complex: openai     # 复杂任务用API

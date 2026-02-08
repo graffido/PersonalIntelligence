@@ -1,494 +1,662 @@
+/**
+ * @file ontology_graph.cpp
+ * @brief 本体图谱实现
+ * 
+ * 实现概念CRUD、关系管理、语义搜索和图谱推理
+ */
+
 #include "ontology_graph.h"
-#include <nlohmann/json.hpp>
-#include <rocksdb/db.h>
 #include <rocksdb/write_batch.h>
+#include <rocksdb/snapshot.h>
+#include <rocksdb/table.h>
+#include <folly/json.h>
 #include <queue>
+#include <stack>
 #include <set>
-#include <fstream>
-#include <iostream>
+#include <filesystem>
+#include <algorithm>
 
-namespace pos {
+namespace personal_ontology {
+namespace ontology {
 
-using json = nlohmann::json;
+// =============================================================================
+// 构造函数和析构函数
+// =============================================================================
 
-// 内部实现类
-class OntologyGraph::Impl {
-public:
-    std::unique_ptr<rocksdb::DB> db_;
-    std::string db_path_;
+OntologyGraph::OntologyGraph(const OntologyGraphConfig& config)
+    : config_(config), initialized_(false) {
+}
+
+OntologyGraph::~OntologyGraph() {
+    if (initialized_) {
+        shutdown();
+    }
+}
+
+OntologyGraph::OntologyGraph(OntologyGraph&& other) noexcept
+    : config_(std::move(other.config_))
+    , db_(std::move(other.db_))
+    , cf_concepts_(other.cf_concepts_)
+    , cf_relations_(other.cf_relations_)
+    , cf_index_(other.cf_index_)
+    , initialized_(other.initialized_)
+    , concept_cache_(std::move(other.concept_cache_))
+    , hnsw_index_(std::move(other.hnsw_index_)) {
     
-    explicit Impl(const std::string& path) : db_path_(path) {
-        rocksdb::Options options;
-        options.create_if_missing = true;
-        options.IncreaseParallelism();
-        options.OptimizeLevelStyleCompaction();
+    other.cf_concepts_ = nullptr;
+    other.cf_relations_ = nullptr;
+    other.cf_index_ = nullptr;
+    other.initialized_ = false;
+}
+
+OntologyGraph& OntologyGraph::operator=(OntologyGraph&& other) noexcept {
+    if (this != &other) {
+        if (initialized_) {
+            shutdown();
+        }
         
-        rocksdb::DB* db;
-        rocksdb::Status status = rocksdb::DB::Open(options, path, &db);
+        config_ = std::move(other.config_);
+        db_ = std::move(other.db_);
+        cf_concepts_ = other.cf_concepts_;
+        cf_relations_ = other.cf_relations_;
+        cf_index_ = other.cf_index_;
+        initialized_ = other.initialized_;
+        concept_cache_ = std::move(other.concept_cache_);
+        hnsw_index_ = std::move(other.hnsw_index_);
+        
+        other.cf_concepts_ = nullptr;
+        other.cf_relations_ = nullptr;
+        other.cf_index_ = nullptr;
+        other.initialized_ = false;
+    }
+    return *this;
+}
+
+// =============================================================================
+// 初始化和关闭
+// =============================================================================
+
+Result<bool> OntologyGraph::initialize() {
+    try {
+        // 创建数据目录
+        std::filesystem::create_directories(config_.data_path);
+        
+        // 配置RocksDB选项
+        rocksdb::Options options;
+        options.create_if_missing = config_.create_if_missing;
+        options.max_open_files = config_.max_open_files;
+        
+        // 配置块缓存
+        rocksdb::BlockBasedTableOptions table_options;
+        table_options.block_cache = rocksdb::NewLRUCache(config_.cache_size_mb * 1024 * 1024);
+        options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
+        
+        // 配置压缩
+        if (config_.enable_compression) {
+            options.compression = rocksdb::kLZ4Compression;
+            options.bottommost_compression = rocksdb::kZSTD;
+        }
+        
+        // 配置WAL
+        options.WAL_ttl_seconds = 3600;  // 1小时WAL保留
+        
+        // 列族配置
+        rocksdb::ColumnFamilyOptions cf_options;
+        cf_options.compression = rocksdb::kLZ4Compression;
+        
+        std::vector<rocksdb::ColumnFamilyDescriptor> cf_descriptors;
+        cf_descriptors.emplace_back("concepts", cf_options);
+        cf_descriptors.emplace_back("relations", cf_options);
+        cf_descriptors.emplace_back("indices", cf_options);
+        
+        std::vector<rocksdb::ColumnFamilyHandle*> handles;
+        rocksdb::Status status;
+        
+        // 尝试打开现有数据库
+        status = rocksdb::DB::Open(options, config_.data_path, cf_descriptors, &handles, &db_);
+        
         if (!status.ok()) {
-            throw std::runtime_error("Failed to open ontology database: " + 
-                                   status.ToString());
-        }
-        db_.reset(db);
-    }
-    
-    ~Impl() = default;
-    
-    // 键生成
-    std::string conceptKey(const ConceptId& id) const {
-        return "c:" + id;
-    }
-    
-    std::string labelIndexKey(const std::string& label) const {
-        return "idx:label:" + label;
-    }
-    
-    std::string typeIndexKey(ConceptType type) const {
-        return "idx:type:" + conceptTypeToString(type);
-    }
-    
-    std::string relationKey(const ConceptId& from, const ConceptId& to) const {
-        return "r:" + from + ":" + to;
-    }
-    
-    std::string metaKey(const std::string& key) const {
-        return "meta:" + key;
-    }
-};
-
-// OntologyConcept方法实现
-void OntologyConcept::bindMemory(const MemoryId& memory_id) {
-    bound_memories.insert(memory_id);
-    updated_at = std::chrono::system_clock::now();
-}
-
-void OntologyConcept::unbindMemory(const MemoryId& memory_id) {
-    bound_memories.erase(memory_id);
-    updated_at = std::chrono::system_clock::now();
-}
-
-void OntologyConcept::addRelation(const Relation& rel) {
-    relations.push_back(rel);
-    updated_at = std::chrono::system_clock::now();
-}
-
-bool OntologyConcept::hasRelationTo(const ConceptId& target, RelationType type) const {
-    for (const auto& rel : relations) {
-        if (rel.target == target && rel.type == type) {
-            return true;
-        }
-    }
-    return false;
-}
-
-std::string OntologyConcept::toJson() const {
-    json j;
-    j["id"] = id;
-    j["type"] = conceptTypeToString(type);
-    j["label"] = label;
-    j["description"] = description;
-    
-    // 属性
-    for (const auto& [key, val] : properties) {
-        std::visit([&j, &key](auto&& arg) {
-            j["properties"][key] = arg;
-        }, val);
-    }
-    
-    // 关系
-    j["relations"] = json::array();
-    for (const auto& rel : relations) {
-        json rj;
-        rj["type"] = relationTypeToString(rel.type);
-        rj["target"] = rel.target;
-        rj["weight"] = rel.weight;
-        if (rel.temporal_constraint) {
-            rj["temporal_constraint"] = *rel.temporal_constraint;
-        }
-        j["relations"].push_back(rj);
-    }
-    
-    // 记忆绑定
-    j["bound_memories"] = bound_memories;
-    
-    // 元数据
-    j["created_at"] = timestampToString(created_at);
-    j["updated_at"] = timestampToString(updated_at);
-    j["confidence"] = confidence;
-    j["source"] = source;
-    j["access_count"] = access_count;
-    
-    return j.dump(2);
-}
-
-OntologyConcept OntologyConcept::fromJson(const std::string& json_str) {
-    json j = json::parse(json_str);
-    OntologyConcept concept;
-    
-    concept.id = j["id"];
-    concept.type = stringToConceptType(j["type"]);
-    concept.label = j["label"];
-    concept.description = j.value("description", "");
-    
-    // 解析属性
-    if (j.contains("properties")) {
-        for (auto& [key, val] : j["properties"].items()) {
-            if (val.is_string()) {
-                concept.properties[key] = val.get<std::string>();
-            } else if (val.is_number_integer()) {
-                concept.properties[key] = val.get<int>();
-            } else if (val.is_number_float()) {
-                concept.properties[key] = val.get<double>();
-            } else if (val.is_boolean()) {
-                concept.properties[key] = val.get<bool>();
+            // 可能是新数据库，尝试创建
+            if (config_.create_if_missing) {
+                status = rocksdb::DB::Open(options, config_.data_path, &db_);
+                if (status.ok()) {
+                    // 创建列族
+                    for (const auto& desc : cf_descriptors) {
+                        rocksdb::ColumnFamilyHandle* cf;
+                        status = db_>CreateColumnFamily(desc.options, desc.name, &cf);
+                        if (!status.ok()) {
+                            return Result<bool>(ErrorCode::STORAGE_WRITE_ERROR,
+                                std::format("Failed to create column family {}: {}", 
+                                    desc.name, status.ToString()));
+                        }
+                        delete cf;
+                    }
+                    db_.reset();
+                    
+                    // 重新打开
+                    status = rocksdb::DB::Open(options, config_.data_path, cf_descriptors, &handles, &db_);
+                }
             }
         }
-    }
-    
-    // 解析关系
-    if (j.contains("relations")) {
-        for (const auto& rj : j["relations"]) {
-            Relation rel;
-            rel.type = stringToRelationType(rj["type"]);
-            rel.target = rj["target"];
-            rel.weight = rj.value("weight", 1.0f);
-            if (rj.contains("temporal_constraint")) {
-                rel.temporal_constraint = rj["temporal_constraint"];
-            }
-            concept.relations.push_back(rel);
+        
+        if (!status.ok()) {
+            return Result<bool>(ErrorCode::STORAGE_WRITE_ERROR,
+                std::format("Failed to open database: {}", status.ToString()));
         }
+        
+        cf_concepts_ = handles[0];
+        cf_relations_ = handles[1];
+        cf_index_ = handles[2];
+        
+        initialized_ = true;
+        return Result<bool>(true);
+        
+    } catch (const std::exception& e) {
+        return Result<bool>(ErrorCode::INTERNAL_ERROR,
+            std::format("Initialization failed: {}", e.what()));
     }
-    
-    // 解析记忆绑定
-    if (j.contains("bound_memories")) {
-        for (const auto& m : j["bound_memories"]) {
-            concept.bound_memories.insert(m);
-        }
-    }
-    
-    concept.created_at = parseTimestamp(j["created_at"]);
-    concept.updated_at = parseTimestamp(j["updated_at"]);
-    concept.confidence = j.value("confidence", 1.0f);
-    concept.source = j.value("source", "imported");
-    concept.access_count = j.value("access_count", 0);
-    
-    return concept;
 }
 
-// OntologyGraph实现
-OntologyGraph::OntologyGraph(const std::string& storage_path)
-    : pimpl_(std::make_unique<Impl>(storage_path)) {}
-
-OntologyGraph::~OntologyGraph() = default;
-
-ConceptId OntologyGraph::createConcept(const std::string& label, ConceptType type,
-                                       const std::string& source) {
-    std::lock_guard<std::mutex> lock(mutex_);
+void OntologyGraph::shutdown() {
+    if (!initialized_) return;
     
-    ConceptId id = generateUUID();
-    OntologyConcept concept;
-    concept.id = id;
-    concept.type = type;
-    concept.label = label;
-    concept.created_at = std::chrono::system_clock::now();
+    // 刷新所有数据
+    db_>Flush(rocksdb::FlushOptions());
+    
+    // 关闭列族句柄
+    delete cf_concepts_;
+    delete cf_relations_;
+    delete cf_index_;
+    
+    cf_concepts_ = nullptr;
+    cf_relations_ = nullptr;
+    cf_index_ = nullptr;
+    
+    db_.reset();
+    initialized_ = false;
+}
+
+// =============================================================================
+// 概念CRUD操作
+// =============================================================================
+
+Result<ConceptId> OntologyGraph::createConcept(OntologyConcept concept) {
+    if (concept.id.empty()) {
+        concept.id = generateUUID();
+    }
+    concept.created_at = MemoryTrace::now();
     concept.updated_at = concept.created_at;
-    concept.source = source;
     
-    // 存储概念
-    std::string key = pimpl_->conceptKey(id);
-    std::string value = concept.toJson();
-    pimpl_->db_->Put(rocksdb::WriteOptions(), key, value);
-    
-    // 更新标签索引
-    std::string labelKey = pimpl_->labelIndexKey(label);
-    std::string existing;
-    pimpl_->db_->Get(rocksdb::ReadOptions(), labelKey, &existing);
-    if (!existing.empty()) {
-        existing += "," + id;
-    } else {
-        existing = id;
+    // 检查是否已存在
+    if (conceptExists(concept.id)) {
+        return Result<ConceptId>(ErrorCode::STORAGE_ALREADY_EXISTS,
+            std::format("Concept already exists: {}", concept.id));
     }
-    pimpl_->db_->Put(rocksdb::WriteOptions(), labelKey, existing);
     
-    // 更新类型索引
-    std::string typeKey = pimpl_->typeIndexKey(type);
-    pimpl_->db_->Get(rocksdb::ReadOptions(), typeKey, &existing);
-    if (!existing.empty()) {
-        existing += "," + id;
-    } else {
-        existing = id;
-    }
-    pimpl_->db_->Put(rocksdb::WriteOptions(), typeKey, existing);
+    // 序列化并存储
+    std::string data = serializeConcept(concept);
     
-    // 更新计数
-    std::string countStr;
-    pimpl_->db_->Get(rocksdb::ReadOptions(), pimpl_->metaKey("concept_count"), &countStr);
-    int count = countStr.empty() ? 0 : std::stoi(countStr);
-    pimpl_->db_->Put(rocksdb::WriteOptions(), 
-                       pimpl_->metaKey("concept_count"), 
-                       std::to_string(count + 1));
+    rocksdb::WriteOptions write_options;
+    write_options.sync = config_.sync_writes;
     
-    return id;
-}
-
-std::optional<OntologyConcept> OntologyGraph::getConcept(const ConceptId& id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    std::string value;
-    rocksdb::Status status = pimpl_->db_->Get(rocksdb::ReadOptions(), 
-                                               pimpl_->conceptKey(id), &value);
+    rocksdb::Status status = db_>Put(write_options, cf_concepts_, concept.id, data);
     
     if (!status.ok()) {
-        return std::nullopt;
+        return Result<ConceptId>(ErrorCode::STORAGE_WRITE_ERROR,
+            std::format("Failed to store concept: {}", status.ToString()));
     }
     
-    auto concept = OntologyConcept::fromJson(value);
-    concept.access_count++;
+    // 更新名称索引
+    updateNameIndex(concept.id, "", concept.name);
     
-    // 异步更新访问计数（简化实现）
-    const_cast<OntologyGraph*>(this)->pimpl_->db_->Put(
-        rocksdb::WriteOptions(),
-        pimpl_->conceptKey(id),
-        concept.toJson()
-    );
+    // 添加到缓存
+    {
+        tbb::concurrent_hash_map<ConceptId, OntologyConcept>::accessor accessor;
+        concept_cache_.insert(accessor, concept.id);
+        accessor->second = concept;
+    }
     
-    return concept;
+    return Result<ConceptId>(concept.id);
 }
 
-std::vector<OntologyConcept> OntologyGraph::findConceptsByLabel(
-    const std::string& label, int limit) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+Result<std::vector<ConceptId>> OntologyGraph::createConceptsBatch(
+    std::vector<OntologyConcept> concepts) {
     
-    std::vector<OntologyConcept> results;
-    std::string indexValue;
+    std::vector<ConceptId> ids;
+    ids.reserve(concepts.size());
     
-    rocksdb::Status status = pimpl_->db_->Get(
-        rocksdb::ReadOptions(),
-        pimpl_->labelIndexKey(label),
-        &indexValue
-    );
+    rocksdb::WriteBatch batch;
     
-    if (!status.ok() || indexValue.empty()) {
-        return results;
+    for (auto& concept : concepts) {
+        if (concept.id.empty()) {
+            concept.id = generateUUID();
+        }
+        concept.created_at = MemoryTrace::now();
+        concept.updated_at = concept.created_at;
+        
+        std::string data = serializeConcept(concept);
+        batch.Put(cf_concepts_, concept.id, data);
+        
+        // 更新名称索引
+        updateNameIndex(concept.id, "", concept.name);
+        
+        ids.push_back(concept.id);
     }
     
-    // 分割逗号分隔的ID列表
-    std::stringstream ss(indexValue);
-    std::string id;
-    int count = 0;
-    while (std::getline(ss, id, ',') && count < limit) {
-        auto concept = getConcept(id);
-        if (concept) {
-            results.push_back(*concept);
-            count++;
+    rocksdb::WriteOptions write_options;
+    auto status = db_>Write(write_options, &batch);
+    
+    if (!status.ok()) {
+        return Result<std::vector<ConceptId>>(ErrorCode::STORAGE_WRITE_ERROR,
+            std::format("Batch write failed: {}", status.ToString()));
+    }
+    
+    return Result<std::vector<ConceptId>>(std::move(ids));
+}
+
+Result<OntologyConcept> OntologyGraph::getConcept(const ConceptId& id) const {
+    // 先查缓存
+    {
+        tbb::concurrent_hash_map<ConceptId, OntologyConcept>::const_accessor accessor;
+        if (concept_cache_.find(accessor, id)) {
+            return Result<OntologyConcept>(accessor->second);
         }
     }
     
-    return results;
-}
-
-std::vector<OntologyConcept> OntologyGraph::findConceptsByType(
-    ConceptType type, int limit) const {
-    std::vector<OntologyConcept> results;
-    std::string indexValue;
+    // 查数据库
+    rocksdb::ReadOptions read_options;
+    std::string data;
     
-    rocksdb::Status status = pimpl_->db_->Get(
-        rocksdb::ReadOptions(),
-        pimpl_->typeIndexKey(type),
-        &indexValue
-    );
+    auto status = db_>Get(read_options, cf_concepts_, id, &data);
     
-    if (!status.ok() || indexValue.empty()) {
-        return results;
+    if (status.IsNotFound()) {
+        return Result<OntologyConcept>(ErrorCode::STORAGE_NOT_FOUND,
+            std::format("Concept not found: {}", id));
     }
     
-    std::stringstream ss(indexValue);
-    std::string id;
-    int count = 0;
-    while (std::getline(ss, id, ',') && count < limit) {
-        auto concept = getConcept(id);
-        if (concept) {
-            results.push_back(*concept);
-            count++;
+    if (!status.ok()) {
+        return Result<OntologyConcept>(ErrorCode::STORAGE_READ_ERROR,
+            std::format("Failed to read concept: {}", status.ToString()));
+    }
+    
+    auto result = deserializeConcept(data);
+    if (result.isError()) {
+        return result;
+    }
+    
+    // 添加到缓存
+    {
+        tbb::concurrent_hash_map<ConceptId, OntologyConcept>::accessor accessor;
+        if (concept_cache_.insert(accessor, id)) {
+            accessor->second = result.value();
         }
     }
     
-    return results;
+    return result;
 }
 
-bool OntologyGraph::updateConcept(const OntologyConcept& concept) {
-    std::lock_guard<std::mutex> lock(mutex_);
+Result<std::vector<OntologyConcept>> OntologyGraph::getConceptsBatch(
+    const std::vector<ConceptId>& ids) const {
     
-    auto updated = concept;
-    updated.updated_at = std::chrono::system_clock::now();
+    std::vector<OntologyConcept> concepts;
+    concepts.reserve(ids.size());
     
-    rocksdb::Status status = pimpl_->db_->Put(
-        rocksdb::WriteOptions(),
-        pimpl_->conceptKey(concept.id),
-        updated.toJson()
-    );
+    for (const auto& id : ids) {
+        auto result = getConcept(id);
+        if (result.isOk()) {
+            concepts.push_back(std::move(result.value()));
+        }
+    }
     
+    return Result<std::vector<OntologyConcept>>(std::move(concepts));
+}
+
+Result<bool> OntologyGraph::updateConcept(
+    const ConceptId& id, const ConceptUpdateRequest& update) {
+    
+    auto concept_result = getConcept(id);
+    if (concept_result.isError()) {
+        return Result<bool>(concept_result.errorCode(), concept_result.errorMessage());
+    }
+    
+    auto concept = concept_result.value();
+    std::string old_name = concept.name;
+    
+    // 应用更新
+    if (update.name.has_value()) {
+        concept.name = update.name.value();
+    }
+    if (update.aliases.has_value()) {
+        concept.aliases = update.aliases.value();
+    }
+    if (update.concept_type.has_value()) {
+        concept.concept_type = update.concept_type.value();
+    }
+    if (update.description.has_value()) {
+        concept.description = update.description.value();
+    }
+    if (update.properties.has_value()) {
+        // 合并属性
+        for (const auto& [key, value] : update.properties.value()) {
+            concept.properties[key] = value;
+        }
+    }
+    if (update.add_sources.has_value()) {
+        concept.sources.insert(concept.sources.end(), 
+            update.add_sources.value().begin(), 
+            update.add_sources.value().end());
+    }
+    
+    concept.updated_at = MemoryTrace::now();
+    
+    // 存储更新
+    std::string data = serializeConcept(concept);
+    rocksdb::WriteOptions write_options;
+    auto status = db_>Put(write_options, cf_concepts_, id, data);
+    
+    if (!status.ok()) {
+        return Result<bool>(ErrorCode::STORAGE_WRITE_ERROR,
+            std::format("Failed to update concept: {}", status.ToString()));
+    }
+    
+    // 更新索引
+    if (concept.name != old_name) {
+        updateNameIndex(id, old_name, concept.name);
+    }
+    
+    // 更新缓存
+    {
+        tbb::concurrent_hash_map<ConceptId, OntologyConcept>::accessor accessor;
+        if (concept_cache_.find(accessor, id)) {
+            accessor->second = concept;
+        }
+    }
+    
+    return Result<bool>(true);
+}
+
+Result<bool> OntologyGraph::deleteConcept(const ConceptId& id) {
+    // 获取概念以检查是否存在
+    auto concept_result = getConcept(id);
+    if (concept_result.isError()) {
+        return Result<bool>(concept_result.errorCode(), concept_result.errorMessage());
+    }
+    
+    const auto& concept = concept_result.value();
+    
+    // 删除所有相关关系
+    rocksdb::WriteBatch batch;
+    
+    // 删除出边关系
+    for (const auto& rel : concept.outgoing_relations) {
+        std::string rel_key = std::format("{}:{}", id, rel.target_concept_id);
+        batch.Delete(cf_relations_, rel_key);
+    }
+    
+    // 删除入边关系 (需要扫描)
+    rocksdb::ReadOptions read_options;
+    std::unique_ptr<rocksdb::Iterator> it(db_>NewIterator(read_options, cf_relations_));
+    
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+        auto rel_result = deserializeRelation(it->value().ToString());
+        if (rel_result.isOk()) {
+            const auto& rel = rel_result.value();
+            // 解析key: from_id:to_id
+            std::string key = it->key().ToString();
+            size_t pos = key.find(':');
+            if (pos != std::string::npos) {
+                std::string from_id = key.substr(0, pos);
+                std::string to_id = key.substr(pos + 1);
+                if (to_id == id) {
+                    batch.Delete(cf_relations_, it->key());
+                }
+            }
+        }
+    }
+    
+    // 删除概念本身
+    batch.Delete(cf_concepts_, id);
+    
+    rocksdb::WriteOptions write_options;
+    auto status = db_>Write(write_options, &batch);
+    
+    if (!status.ok()) {
+        return Result<bool>(ErrorCode::STORAGE_WRITE_ERROR,
+            std::format("Failed to delete concept: {}", status.ToString()));
+    }
+    
+    // 更新索引
+    updateNameIndex(id, concept.name, "");
+    
+    // 从缓存移除
+    concept_cache_.erase(id);
+    
+    return Result<bool>(true);
+}
+
+bool OntologyGraph::conceptExists(const ConceptId& id) const {
+    rocksdb::ReadOptions read_options;
+    std::string data;
+    auto status = db_>Get(read_options, cf_concepts_, id, &data);
     return status.ok();
 }
 
-bool OntologyGraph::deleteConcept(const ConceptId& id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+// =============================================================================
+// 关系操作
+// =============================================================================
+
+Result<bool> OntologyGraph::addRelation(
+    const ConceptId& from, const ConceptRelation& relation) {
     
-    // 获取概念以清理索引
-    auto concept_opt = getConcept(id);
-    if (!concept_opt) {
+    // 检查源概念是否存在
+    if (!conceptExists(from)) {
+        return Result<bool>(ErrorCode::STORAGE_NOT_FOUND,
+            std::format("Source concept not found: {}", from));
+    }
+    
+    // 检查目标概念是否存在
+    if (!conceptExists(relation.target_concept_id)) {
+        return Result<bool>(ErrorCode::STORAGE_NOT_FOUND,
+            std::format("Target concept not found: {}", relation.target_concept_id));
+    }
+    
+    // 检查是否已存在相同关系
+    std::string rel_key = std::format("{}:{}", from, relation.target_concept_id);
+    
+    rocksdb::ReadOptions read_options;
+    std::string existing;
+    auto status = db_>Get(read_options, cf_relations_, rel_key, &existing);
+    
+    if (status.ok()) {
+        return Result<bool>(ErrorCode::STORAGE_ALREADY_EXISTS,
+            "Relation already exists");
+    }
+    
+    // 存储关系
+    ConceptRelation rel = relation;
+    rel.created_at = MemoryTrace::now();
+    
+    std::string data = serializeRelation(rel);
+    rocksdb::WriteOptions write_options;
+    status = db_>Put(write_options, cf_relations_, rel_key, data);
+    
+    if (!status.ok()) {
+        return Result<bool>(ErrorCode::STORAGE_WRITE_ERROR,
+            std::format("Failed to store relation: {}", status.ToString()));
+    }
+    
+    // 更新概念的出边列表
+    auto from_concept_result = getConcept(from);
+    if (from_concept_result.isOk()) {
+        auto concept = from_concept_result.value();
+        concept.outgoing_relations.push_back(rel);
+        
+        // 更新目标概念的入边列表
+        auto to_concept_result = getConcept(relation.target_concept_id);
+        if (to_concept_result.isOk()) {
+            auto to_concept = to_concept_result.value();
+            to_concept.incoming_relations.push_back(rel);
+            
+            // 批量更新
+            rocksdb::WriteBatch batch;
+            batch.Put(cf_concepts_, from, serializeConcept(concept));
+            batch.Put(cf_concepts_, relation.target_concept_id, serializeConcept(to_concept));
+            db_>Write(write_options, &batch);
+            
+            // 更新缓存
+            {
+                tbb::concurrent_hash_map<ConceptId, OntologyConcept>::accessor accessor;
+                if (concept_cache_.find(accessor, from)) {
+                    accessor->second = concept;
+                }
+                if (concept_cache_.find(accessor, relation.target_concept_id)) {
+                    accessor->second = to_concept;
+                }
+            }
+        }
+    }
+    
+    return Result<bool>(true);
+}
+
+Result<bool> OntologyGraph::addRelationsBatch(
+    const std::vector<std::pair<ConceptId, ConceptRelation>>& relations) {
+    
+    rocksdb::WriteBatch batch;
+    
+    for (const auto& [from, relation] : relations) {
+        std::string rel_key = std::format("{}:{}", from, relation.target_concept_id);
+        std::string data = serializeRelation(relation);
+        batch.Put(cf_relations_, rel_key, data);
+    }
+    
+    rocksdb::WriteOptions write_options;
+    auto status = db_>Write(write_options, &batch);
+    
+    if (!status.ok()) {
+        return Result<bool>(ErrorCode::STORAGE_WRITE_ERROR,
+            std::format("Batch relation write failed: {}", status.ToString()));
+    }
+    
+    return Result<bool>(true);
+}
+
+Result<bool> OntologyGraph::removeRelation(
+    const ConceptId& from, const ConceptId& to, RelationType type) {
+    
+    std::string rel_key = std::format("{}:{}", from, to);
+    
+    rocksdb::WriteOptions write_options;
+    auto status = db_>Delete(write_options, cf_relations_, rel_key);
+    
+    if (!status.ok() && !status.IsNotFound()) {
+        return Result<bool>(ErrorCode::STORAGE_WRITE_ERROR,
+            std::format("Failed to remove relation: {}", status.ToString()));
+    }
+    
+    // 更新概念的关系列表
+    auto from_result = getConcept(from);
+    if (from_result.isOk()) {
+        auto concept = from_result.value();
+        concept.outgoing_relations.erase(
+            std::remove_if(concept.outgoing_relations.begin(), 
+                          concept.outgoing_relations.end(),
+                          [&to, type](const ConceptRelation& r) {
+                              return r.target_concept_id == to && r.type == type;
+                          }),
+            concept.outgoing_relations.end()
+        );
+        
+        rocksdb::WriteOptions write_options;
+        db_>Put(write_options, cf_concepts_, from, serializeConcept(concept));
+    }
+    
+    return Result<bool>(true);
+}
+
+Result<std::vector<ConceptRelation>> OntologyGraph::queryRelations(
+    const ConceptId& concept_id, const RelationQuery& query) const {
+    
+    auto concept_result = getConcept(concept_id);
+    if (concept_result.isError()) {
+        return Result<std::vector<ConceptRelation>>(
+            concept_result.errorCode(), concept_result.errorMessage());
+    }
+    
+    const auto& concept = concept_result.value();
+    std::vector<ConceptRelation> results;
+    
+    // 出边
+    if (query.direction == RelationQuery::Direction::OUTGOING ||
+        query.direction == RelationQuery::Direction::BOTH) {
+        for (const auto& rel : concept.outgoing_relations) {
+            if (matchesRelationQuery(rel, query)) {
+                results.push_back(rel);
+            }
+        }
+    }
+    
+    // 入边
+    if (query.direction == RelationQuery::Direction::INCOMING ||
+        query.direction == RelationQuery::Direction::BOTH) {
+        for (const auto& rel : concept.incoming_relations) {
+            // 反转关系用于查询
+            if (matchesRelationQuery(rel, query)) {
+                results.push_back(rel);
+            }
+        }
+    }
+    
+    return Result<std::vector<ConceptRelation>>(std::move(results));
+}
+
+bool OntologyGraph::matchesRelationQuery(
+    const ConceptRelation& rel, const RelationQuery& query) const {
+    
+    if (query.type_filter.has_value() && rel.type != query.type_filter.value()) {
         return false;
     }
     
-    auto concept = *concept_opt;
-    
-    // 删除标签索引
-    std::string labelKey = pimpl_->labelIndexKey(concept.label);
-    std::string labelIndex;
-    pimpl_->db_->Get(rocksdb::ReadOptions(), labelKey, &labelIndex);
-    // TODO: 从索引中移除该ID
-    
-    // 删除类型索引
-    std::string typeKey = pimpl_->typeIndexKey(concept.type);
-    std::string typeIndex;
-    pimpl_->db_->Get(rocksdb::ReadOptions(), typeKey, &typeIndex);
-    // TODO: 从索引中移除该ID
-    
-    // 删除概念
-    rocksdb::Status status = pimpl_->db_->Delete(
-        rocksdb::WriteOptions(),
-        pimpl_->conceptKey(id)
-    );
-    
-    return status.ok();
-}
-
-bool OntologyGraph::addRelation(const ConceptId& from, const ConceptId& to,
-                               RelationType type, float weight,
-                               const std::optional<std::string>& temporal) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    auto from_opt = getConcept(from);
-    if (!from_opt) return false;
-    
-    auto from_concept = *from_opt;
-    
-    OntologyConcept::Relation rel;
-    rel.type = type;
-    rel.target = to;
-    rel.weight = weight;
-    rel.temporal_constraint = temporal;
-    
-    from_concept.addRelation(rel);
-    
-    return updateConcept(from_concept);
-}
-
-std::vector<OntologyConcept> OntologyGraph::getRelatedConcepts(
-    const ConceptId& concept_id, RelationType type, int depth) const {
-    std::vector<OntologyConcept> results;
-    std::set<ConceptId> visited;
-    std::queue<std::pair<ConceptId, int>> queue;
-    
-    queue.push({concept_id, 0});
-    visited.insert(concept_id);
-    
-    while (!queue.empty()) {
-        auto [current_id, current_depth] = queue.front();
-        queue.pop();
-        
-        if (current_depth >= depth) continue;
-        
-        auto concept_opt = getConcept(current_id);
-        if (!concept_opt) continue;
-        
-        auto concept = *concept_opt;
-        
-        for (const auto& rel : concept.relations) {
-            if (rel.type == type && visited.find(rel.target) == visited.end()) {
-                auto related_opt = getConcept(rel.target);
-                if (related_opt) {
-                    results.push_back(*related_opt);
-                    visited.insert(rel.target);
-                    queue.push({rel.target, current_depth + 1});
-                }
-            }
-        }
+    if (query.target_filter.has_value() && 
+        rel.target_concept_id != query.target_filter.value()) {
+        return false;
     }
     
-    return results;
-}
-
-std::vector<OntologyConcept> OntologyGraph::expandSemantically(
-    const ConceptId& concept_id, int depth, float min_weight) const {
-    std::vector<OntologyConcept> results;
-    std::set<ConceptId> visited;
-    std::queue<std::pair<ConceptId, int>> queue;
-    
-    queue.push({concept_id, 0});
-    visited.insert(concept_id);
-    
-    while (!queue.empty()) {
-        auto [current_id, current_depth] = queue.front();
-        queue.pop();
-        
-        if (current_depth >= depth) continue;
-        
-        auto concept_opt = getConcept(current_id);
-        if (!concept_opt) continue;
-        
-        auto concept = *concept_opt;
-        
-        for (const auto& rel : concept.relations) {
-            if (rel.weight >= min_weight && 
-                visited.find(rel.target) == visited.end()) {
-                auto related_opt = getConcept(rel.target);
-                if (related_opt) {
-                    results.push_back(*related_opt);
-                    visited.insert(rel.target);
-                    queue.push({rel.target, current_depth + 1});
-                }
-            }
-        }
+    if (query.min_confidence.has_value() && 
+        rel.confidence < query.min_confidence.value()) {
+        return false;
     }
     
-    return results;
+    return true;
 }
 
-void OntologyGraph::bindMemoryToConcept(const ConceptId& concept, 
-                                       const MemoryId& memory) {
-    std::lock_guard<std::mutex> lock(mutex_);
+Result<std::vector<ConceptRelation>> OntologyGraph::getRelationsBetween(
+    const ConceptId& from, const ConceptId& to) const {
     
-    auto concept_opt = getConcept(concept);
-    if (!concept_opt) return;
+    std::vector<ConceptRelation> results;
     
-    auto c = *concept_opt;
-    c.bindMemory(memory);
-    updateConcept(c);
-}
-
-size_t OntologyGraph::getConceptCount() const {
-    std::string countStr;
-    pimpl_->db_->Get(rocksdb::ReadOptions(), 
-                      pimpl_->metaKey("concept_count"), &countStr);
-    return countStr.empty() ? 0 : std::stoul(countStr);
-}
-
-std::string OntologyGraph::exportToJson() const {
-    json result;
-    result["concepts"] = json::array();
-    result["export_time"] = timestampToString(std::chrono::system_clock::now());
-    
-    // 使用迭代器遍历所有概念
+    // 查询从from到to的关系
+    std::string rel_key = std::format("{}:{}", from, to);
     rocksdb::ReadOptions read_options;
-    std::unique_ptr<rocksdb::Iterator> it(pimpl_->db_->NewIterator(read_options));
+    std::string data;
     
-    for (it->Seek("c:"); it->Valid() && it->key().starts_with("c:"); it->Next()) {
-        auto concept = OntologyConcept::fromJson(it->value().ToString());
-        result["concepts"].push_back(json::parse(concept.toJson()));
+    auto status = db_>Get(read_options, cf_relations_, rel_key, &data);
+    if (status.ok()) {
+        auto result = deserializeRelation(data);
+        if (result.isOk()) {
+            results.push_back(result.value());
+        }
     }
     
-    return result.dump(2);
+    // 查询反向关系
+    std::string reverse_key = std::format("{}:{}", to, from);
+    status = db_>Get(read_options, cf_relations_, reverse_key, &data);
+    if (status.ok()) {
+        auto result = deserializeRelation(data);
+        if (result.isOk()) {
+            results.push_back(result.value());
+        }
+    }
+    
+    return Result<std::vector<ConceptRelation>>(std::move(results));
 }
-
-} // namespace pos
