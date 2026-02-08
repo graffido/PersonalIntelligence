@@ -1,0 +1,96 @@
+# Personal Ontology System - Configuration
+
+system:
+  name: "PersonalOntologySystem"
+  version: "1.0.0"
+  log_level: "info"
+  data_dir: "./data"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  workers: 4
+  cors_origins:
+    - "http://localhost:5173"
+    - "http://localhost:3000"
+
+storage:
+  graph:
+    backend: "rocksdb"
+    path: "./data/graph"
+    cache_size_mb: 512
+  
+  vector:
+    backend: "hnsw"
+    path: "./data/vectors"
+    dimension: 384  # 根据embedding模型调整
+    max_elements: 100000
+  
+  temporal:
+    time_index_resolution: "minute"
+    spatial_index: "rtree"
+    default_coord_system: "wgs84"
+
+ml_service:
+  enabled: true
+  endpoint: "http://localhost:8000"
+  timeout_ms: 5000
+  
+  models:
+    embedding:
+      name: "sentence-transformers/all-MiniLM-L6-v2"
+      provider: "local"
+      dimension: 384
+      batch_size: 32
+    
+    ner_entity:
+      name: "en_core_web_sm"
+      provider: "spacy"
+      entity_types:
+        - "PERSON"
+        - "ORG"
+        - "GPE"
+        - "EVENT"
+        - "DATE"
+        - "TIME"
+    
+    llm:
+      name: "gpt-3.5-turbo"
+      provider: "local"
+      temperature: 0.7
+      max_tokens: 2000
+
+external_apis:
+  geocoding:
+    provider: "nominatim"
+    endpoint: "https://nominatim.openstreetmap.org"
+    api_key: ""
+    rate_limit: 1.0
+  
+  places:
+    provider: "overpass"
+    radius_meters: 1000
+  
+  timezone:
+    provider: "timezone-db"
+    api_key: ""
+
+ingestion:
+  supported_formats:
+    - "json"
+    - "csv"
+    - "ical"
+    - "vcard"
+    - "md"
+    - "txt"
+  batch_size: 100
+  auto_extract_entities: true
+  auto_generate_embeddings: true
+  temporal_extraction: true
+
+features:
+  realtime_notifications: true
+  graph_visualization: true
+  temporal_query: true
+  spatial_query: true
+  pattern_discovery: true

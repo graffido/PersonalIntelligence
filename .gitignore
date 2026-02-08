@@ -1,0 +1,410 @@
+# ============================================
+# 通用配置 - 所有项目适用
+# ============================================
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# 编辑器/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.settings/
+*.code-workspace
+
+# 日志文件
+*.log
+logs/
+log/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.temp
+*.cache
+.cache/
+*.pid
+*.seed
+*.pid.lock
+
+# 环境变量（敏感信息！）
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+!.env.example
+!.env.template
+
+# 证书和密钥
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+
+
+# ============================================
+# C++ 相关
+# ============================================
+
+# 编译输出
+*.exe
+*.out
+*.app
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.o
+*.obj
+*.elf
+
+# 预编译头
+*.gch
+*.pch
+
+# 调试文件
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# 构建目录
+build/
+cmake-build-*/
+out/
+bin/
+lib/
+Debug/
+Release/
+x64/
+x86/
+[Bb]uild*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+_deps/
+CMakeUserPresets.json
+
+# Visual Studio
+.vs/
+*.vcxproj*
+*.sln
+*.suo
+*.user
+*.userosscache
+*.dbmdl
+*.dbproj.schemaview
+*.pfx
+*.publishsettings
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+xcuserdata/
+
+# 包管理器
+conan.lock
+conanbuildinfo.*
+conaninfo.txt
+graph_info.json
+vcpkg_installed/
+
+
+# ============================================
+# Python 相关
+# ============================================
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv/
+.env/
+virtualenv/
+.python-version
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 包管理
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+.eggs/
+*.egg
+MANIFEST
+poetry.lock  # 可选：团队统一时保留
+Pipfile.lock # 可选：团队统一时保留
+
+# 分发/打包
+dist/
+build/
+*.manifest
+*.spec
+
+# 测试与覆盖率
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# 文档
+docs/_build/
+site/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IPython
+profile_default/
+ipython_config.py
+
+# 类型检查
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Django/Flask/FastAPI
+*.sqlite3
+*.db
+instance/
+.webassets-cache
+scrapy.cfg
+
+# 其他
+local_settings.py
+db.sqlite3-journal
+celerybeat-schedule
+*.sage.py
+
+
+# ============================================
+# Web 前端相关 (Node.js/React/Vue/Angular)
+# ============================================
+
+# 依赖目录
+node_modules/
+jspm_packages/
+web_modules/
+.pnp/
+.pnp.js
+.pnp.cjs
+.pnp.loader.mjs
+
+# 构建输出
+/dist
+/build
+/out
+/.next/
+/.nuxt/
+/.output/
+/.vercel
+/.turbo
+storybook-static/
+
+# 测试
+/coverage
+.nyc_output
+
+# 包管理器锁定文件（根据团队策略选择）
+# 建议：团队项目保留 lock 文件，个人项目可忽略
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Vue
+*.local
+.vuepress/dist
+.nuxt
+dist
+.swc
+
+# Angular
+.angular/
+.sass-cache/
+connect.lock
+libpeerconnection.log
+testem.log
+typings/
+
+# Vite
+.vite/
+*.local
+
+# Rollup
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Parcel
+.cache/
+.parcel-cache/
+
+# ESLint/Prettier
+.eslintcache
+.prettiercache
+
+# Stylelint
+.stylelintcache
+
+# 框架特定
+.docusaurus/
+.fusebox/
+.dynamodb/
+.tern-port
+.webpack/
+
+
+# ============================================
+# 容器与部署
+# ============================================
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+.docker/
+
+# Kubernetes
+*.kubeconfig
+kubeconfig
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+.terraformrc
+terraform.rc
+
+
+# ============================================
+# 数据库
+# ============================================
+
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sql-journal
+*.mdb
+*.ldb
+
+
+# ============================================
+# 机器学习/数据科学
+# ============================================
+
+# 数据文件
+*.csv
+*.tsv
+*.parquet
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.npy
+*.npz
+
+# 模型文件
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pb
+*.onnx
+*.tflite
+*.mlmodel
+models/
+checkpoints/
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Weights & Biases
+wandb/
+
+
+# ============================================
+# 其他工具
+# ============================================
+
+# GraphQL
+.graphqlconfig
+.graphqlrc*
+
+# 静态站点生成器
+.jekyll-cache/
+.jekyll-metadata
+_site/
+.public/
+
+# 临时文件
+*.bak
+*.orig
+*.rej
+*.patch
+*.diff
+
+# 本地配置文件
+*.local
+local.*
+config.local.*

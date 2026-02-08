@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POS Core v2.0 - 个人本体系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container { max-width: 1200px; margin: 0 auto; }
+        
+        .header { 
+            text-align: center; 
+            color: white; 
+            margin-bottom: 30px;
+            padding: 20px;
+        }
+        
+        .header h1 { font-size: 36px; margin-bottom: 10px; }
+        .header p { font-size: 16px; opacity: 0.9; }
+        
+        .main-card {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        .input-section { margin-bottom: 30px; }
+        
+        .input-label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+            display: block;
+        }
+        
+        .unified-input {
+            width: 100%;
+            padding: 20px;
+            font-size: 18px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            transition: all 0.3s;
+            resize: vertical;
+            min-height: 100px;
+        }
+        
+        .unified-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .btn {
+            padding: 14px 32px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+            margin-left: 10px;
+        }
+        
+        .results-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 30px;
+        }
+        
+        .result-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 24px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .result-card h3 {
+            font-size: 16px;
+            color: #333;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .entity-tag {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            margin: 4px;
+            font-weight: 500;
+        }
+        
+        .entity-PERSON { background: #e3f2fd; color: #1976d2; }
+        .entity-PLACE { background: #e8f5e9; color: #388e3c; }
+        .entity-TIME { background: #fff3e0; color: #f57c00; }
+        .entity-DATE { background: #fce4ec; color: #c2185b; }
+        .entity-EVENT { background: #f3e5f5; color: #7b1fa2; }
+        
+        .reasoning-item {
+            padding: 12px;
+            background: white;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .reasoning-item.conflict {
+            border-left: 3px solid #f44336;
+        }
+        
+        .reasoning-item.pattern {
+            border-left: 3px solid #4caf50;
+        }
+        
+        .recommendation-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 12px;
+        }
+        
+        .recommendation-card h4 {
+            font-size: 14px;
+            margin-bottom: 6px;
+            opacity: 0.9;
+        }
+        
+        .recommendation-card p {
+            font-size: 15px;
+            font-weight: 500;
+        }
+        
+        .stats-bar {
+            display: flex;
+            gap: 30px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 28px;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .loading.active {
+            display: block;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .full-width { grid-column: 1 / -1; }
+        
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🧠 POS Core v2.0</h1>
+            <p>个人本体记忆系统 - 统一输入，智能推理</p>
+        </div>
+        
+        <div class="main-card">
+            <!-- 统一输入区域 -->
+            <div class="input-section">
+                <label class="input-label">✏️ 输入记忆（自然语言）</label>
+                <textarea 
+                    id="inputText" 
+                    class="unified-input" 
+                    placeholder="描述你的记忆，例如：今天早晨8点在星巴克和中伟讨论项目方案...">今天早晨8点在星巴克和中伟讨论项目方案，喝了拿铁咖啡</textarea>
+                
+                <div style="margin-top: 16px;">
+                    <button class="btn btn-primary" onclick="processInput()">
+                        🚀 处理输入
+                    </button>
+                    <button class="btn btn-secondary" onclick="queryMemory()">
+                        🔍 查询记忆
+                    </button>
+                    <button class="btn btn-secondary" onclick="getRecommendations()">
+                        💡 获取推荐
+                    </button>
+                </div>
+            </div>
+            
+            <!-- 加载中 -->
+            <div id="loading" class="loading">
+                <div class="spinner"></div>
+                <p>POS Core 正在推理中...⏳</p>
+            </div>
+            
+            <!-- 结果显示区域 -->
+            <div id="results" class="results-section hidden">
+                <!-- 实体提取 -->
+                <div class="result-card">
+                    <h3>🔍 提取的实体</h3>
+                    <div id="entities"></div>
+                </div>
+                
+                <!-- 推理结果 -->
+                <div class="result-card">
+                    <h3>🧠 推理结果</h3>
+                    <div id="reasoning"></div>
+                </div>
+                
+                <!-- 推荐 -->
+                <div class="result-card full-width">
+                    <h3>💡 智能推荐</h3>
+                    <div id="recommendations"></div>
+                </div>
+            </div>
+            
+            <!-- 统计 -->
+            <div class="stats-bar">
+                <div class="stat-item">
+                    <div class="stat-value" id="statMemories">0</div>
+                    <div class="stat-label">记忆数</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statConcepts">0</div>
+                    <div class="stat-label">概念数</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statRelations">0</div>
+                    <div class="stat-label">关系数</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_URL = 'http://localhost:9000';
+        
+        // 更新统计
+        async function updateStats() {
+            try {
+                const res = await fetch(`${API_URL}/api/v1/stats`);
+                const data = await res.json();
+                document.getElementById('statMemories').textContent = data.memories;
+                document.getElementById('statConcepts').textContent = data.concepts;
+                document.getElementById('statRelations').textContent = data.relations;
+            } catch (e) {
+                console.error('Stats error:', e);
+            }
+        }
+        
+        // 处理输入
+        async function processInput() {
+            const text = document.getElementById('inputText').value;
+            if (!text.trim()) {
+                alert('请输入内容');
+                return;
+            }
+            
+            showLoading(true);
+            
+            try {
+                const res = await fetch(`${API_URL}/api/v1/input`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text: text})
+                });
+                
+                const data = await res.json();
+                displayResults(data);
+                updateStats();
+                
+            } catch (e) {
+                alert('处理失败: ' + e.message);
+            }
+            
+            showLoading(false);
+        }
+        
+        // 查询记忆
+        async function queryMemory() {
+            const text = document.getElementById('inputText').value;
+            if (!text.trim()) {
+                alert('请输入查询内容');
+                return;
+            }
+            
+            showLoading(true);
+            
+            try {
+                const res = await fetch(`${API_URL}/api/v1/query`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text: text, type: 'auto'})
+                });
+                
+                const data = await res.json();
+                alert(`查询策略: ${data.strategy}\n找到 ${data.count} 条记忆`);
+                
+            } catch (e) {
+                alert('查询失败: ' + e.message);
+            }
+            
+            showLoading(false);
+        }
+        
+        // 获取推荐
+        async function getRecommendations() {
+            showLoading(true);
+            
+            try {
+                const res = await fetch(`${API_URL}/api/v1/recommendations`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({limit: 5})
+                });
+                
+                const data = await res.json();
+                displayRecommendations(data.recommendations);
+                
+            } catch (e) {
+                alert('获取推荐失败: ' + e.message);
+            }
+            
+            showLoading(false);
+        }
+        
+        // 显示结果
+        function displayResults(data) {
+            document.getElementById('results').classList.remove('hidden');
+            
+            // 显示实体
+            const entitiesDiv = document.getElementById('entities');
+            entitiesDiv.innerHTML = data.entities.map(e => 
+                `<span class="entity-tag entity-${e.label}">${e.text} (${e.label})</span>`
+            ).join('');
+            
+            // 显示推理结果
+            const reasoningDiv = document.getElementById('reasoning');
+            if (data.reasoning_results.length > 0) {
+                reasoningDiv.innerHTML = data.reasoning_results.map(r => {
+                    const typeClass = r.type === 'conflict' ? 'conflict' : 'pattern';
+                    return `
+                        <div class="reasoning-item ${typeClass}">
+                            <strong>${r.rule_name}</strong>
+                            <p>${r.description}</p>
+                            <small>置信度: ${(r.confidence * 100).toFixed(0)}%</small>
+                        </div>
+                    `;
+                }).join('');
+            } else {
+                reasoningDiv.innerHTML = '<p style="color:#999;">暂无推理结果</p>';
+            }
+            
+            // 显示推荐
+            displayRecommendations(data.recommendations);
+        }
+        
+        // 显示推荐
+        function displayRecommendations(recommendations) {
+            const recDiv = document.getElementById('recommendations');
+            if (recommendations && recommendations.length > 0) {
+                recDiv.innerHTML = recommendations.map(r => `
+                    <div class="recommendation-card">
+                        <h4>${r.title}</h4>
+                        <p>${r.description}</p>
+                    </div>
+                `).join('');
+            } else {
+                recDiv.innerHTML = '<p style="color:#999;">暂无推荐</p>';
+            }
+        }
+        
+        // 显示/隐藏加载
+        function showLoading(show) {
+            document.getElementById('loading').classList.toggle('active', show);
+        }
+        
+        // 初始化
+        updateStats();
+        setInterval(updateStats, 5000);
+    </script>
+</body>
+</html>
