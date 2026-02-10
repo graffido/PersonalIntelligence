@@ -1,6 +1,6 @@
 """
 LLM服务 - 集成多种大语言模型
-支持OpenAI/Claude API和本地模型（llama.cpp/ollama）
+支持OpenAI/Claude/Kimi API和本地模型（llama.cpp/ollama）
 智能路由：简单任务本地，复杂任务API
 """
 import os
@@ -18,6 +18,7 @@ class ModelType(Enum):
     """模型类型"""
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    KIMI = "kimi"              # Moonshot AI / Kimi
     OLLAMA = "ollama"
     LLAMA_CPP = "llama_cpp"
     LOCAL = "local"
@@ -205,6 +206,122 @@ class OpenAIProvider(BaseLLMProvider):
             max_tokens=kwargs.get("max_tokens", self.max_tokens),
             stream=True,
             **{k: v for k, v in kwargs.items() if k not in ["model", "temperature", "max_tokens"]}
+        )
+        
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+
+class KimiProvider(BaseLLMProvider):
+    """
+    Kimi (Moonshot AI) Provider
+    支持Kimi Code / kimi-k2.5 等模型
+    使用OpenAI兼容API格式
+    """
+    
+    # Kimi 模型列表
+    AVAILABLE_MODELS = [
+        "kimi-k2.5",
+        "kimi-latest", 
+        "moonshot-v1-8k",
+        "moonshot-v1-32k",
+        "moonshot-v1-128k"
+    ]
+    
+    def __init__(self, config: Dict):
+        super().__init__(config)
+        self.api_key = config.get("api_key") or os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY")
+        self.base_url = config.get("base_url", "https://api.moonshot.cn/v1")
+        self.client = None
+        
+        if self.api_key:
+            try:
+                from openai import OpenAI
+                self.client = OpenAI(
+                    api_key=self.api_key, 
+                    base_url=self.base_url
+                )
+            except ImportError:
+                print("OpenAI package not installed (required for Kimi API)")
+    
+    def is_available(self) -> bool:
+        return self.client is not None
+    
+    def chat(self, messages: List[Message], **kwargs) -> LLMResponse:
+        if not self.client:
+            raise RuntimeError("Kimi client not initialized. Please set KIMI_API_KEY environment variable.")
+        
+        start_time = time.time()
+        
+        model = kwargs.get("model", self.model_name)
+        # 默认使用 kimi-k2.5
+        if not model or model == "default":
+            model = "kimi-k2.5"
+        
+        # Kimi 支持的工具调用参数
+        extra_kwargs = {}
+        if "tools" in kwargs:
+            extra_kwargs["tools"] = kwargs["tools"]
+        if "tool_choice" in kwargs:
+            extra_kwargs["tool_choice"] = kwargs["tool_choice"]
+        if "response_format" in kwargs:
+            extra_kwargs["response_format"] = kwargs["response_format"]
+        
+        response = self.client.chat.completions.create(
+            model=model,
+            messages=[m.to_dict() for m in messages],
+            temperature=kwargs.get("temperature", self.temperature),
+            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+            **extra_kwargs
+        )
+        
+        latency = (time.time() - start_time) * 1000
+        
+        # 处理可能的 tool_calls
+        message = response.choices[0].message
+        content = message.content or ""
+        metadata = {}
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            metadata["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                } for tc in message.tool_calls
+            ]
+        
+        return LLMResponse(
+            content=content,
+            model=response.model,
+            model_type=ModelType.KIMI,
+            usage={
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            },
+            latency_ms=latency,
+            finish_reason=response.choices[0].finish_reason,
+            metadata=metadata
+        )
+    
+    def stream_chat(self, messages: List[Message], **kwargs) -> Generator[str, None, None]:
+        if not self.client:
+            raise RuntimeError("Kimi client not initialized")
+        
+        model = kwargs.get("model", self.model_name)
+        if not model or model == "default":
+            model = "kimi-k2.5"
+        
+        stream = self.client.chat.completions.create(
+            model=model,
+            messages=[m.to_dict() for m in messages],
+            temperature=kwargs.get("temperature", self.temperature),
+            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+            stream=True
         )
         
         for chunk in stream:
@@ -512,6 +629,7 @@ class LLMService:
     """
     LLM服务主类
     智能路由：简单任务本地，复杂任务API
+    支持 Kimi (Moonshot AI) 作为默认推荐模型
     """
     
     def __init__(self, config: Optional[Dict] = None):
@@ -524,6 +642,11 @@ class LLMService:
         if self.config.get("openai", {}).get("enabled", True):
             openai_config = self.config.get("openai", {})
             self.providers[ModelType.OPENAI] = OpenAIProvider(openai_config)
+        
+        # Kimi (Moonshot AI) - 新增
+        if self.config.get("kimi", {}).get("enabled", True):
+            kimi_config = self.config.get("kimi", {})
+            self.providers[ModelType.KIMI] = KimiProvider(kimi_config)
         
         # Anthropic
         if self.config.get("anthropic", {}).get("enabled", True):
@@ -540,16 +663,16 @@ class LLMService:
             llama_config = self.config.get("llama_cpp", {})
             self.providers[ModelType.LLAMA_CPP] = LlamaCppProvider(llama_config)
         
-        # 路由配置
+        # 路由配置 - 默认优先使用 Kimi
         self.routing_config = self.config.get("routing", {
             "simple": ModelType.OLLAMA,
-            "moderate": ModelType.OLLAMA,
-            "complex": ModelType.OPENAI
+            "moderate": ModelType.KIMI,      # 默认使用 Kimi
+            "complex": ModelType.KIMI        # 复杂任务也使用 Kimi
         })
         
-        # 默认模型
-        self.default_model = self.config.get("default_model", "gpt-4o-mini")
-        self.default_provider = ModelType(self.config.get("default_provider", "openai"))
+        # 默认模型 - 优先 Kimi
+        self.default_model = self.config.get("default_model", "kimi-k2.5")
+        self.default_provider = ModelType(self.config.get("default_provider", "kimi"))
         
         # 缓存
         self.cache = PromptCache(
@@ -605,8 +728,8 @@ class LLMService:
         if provider_type in self.providers and self.providers[provider_type].is_available():
             return provider_type
         
-        # 回退到其他可用provider
-        for ptype in [ModelType.OLLAMA, ModelType.OPENAI, ModelType.ANTHROPIC]:
+        # 回退到其他可用provider (优先Kimi, 其次Ollama, 最后OpenAI)
+        for ptype in [ModelType.KIMI, ModelType.OLLAMA, ModelType.OPENAI, ModelType.ANTHROPIC]:
             if ptype in self.providers and self.providers[ptype].is_available():
                 return ptype
         
@@ -702,12 +825,7 @@ class LLMService:
     
     def get_stats(self) -> Dict:
         """获取使用统计"""
-        return {
-            **self.usage_stats,
-            "cache_size": len(self.cache.cache) if self.cache else 0,
-            "available_providers": [p.value for p in self.providers.keys() 
-                                   if self.providers[p].is_available()]
-        }
+        return self.usage_stats.copy()
     
     def clear_cache(self):
         """清空缓存"""
@@ -716,64 +834,78 @@ class LLMService:
 
 
 # 便捷函数
-def create_llm_service(config: Optional[Dict] = None) -> LLMService:
-    """创建LLM服务"""
+def create_llm_service(config_path: Optional[str] = None) -> LLMService:
+    """
+    创建LLM服务实例
+    
+    Args:
+        config_path: 配置文件路径
+    
+    Returns:
+        LLMService实例
+    """
+    config = {}
+    
+    if config_path and Path(config_path).exists():
+        import yaml
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f).get("llm", {})
+    
     return LLMService(config)
 
 
-def quick_chat(message: str, provider: str = "openai", **kwargs) -> str:
-    """快速聊天"""
-    service = LLMService()
-    return service.simple_chat(message, provider=ModelType(provider), **kwargs)
+# 全局实例
+_llm_service: Optional[LLMService] = None
+
+def get_llm_service(config_path: Optional[str] = None) -> LLMService:
+    """获取全局LLM服务实例"""
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = create_llm_service(config_path)
+    return _llm_service
+
+
+def quick_chat(message: str, provider: Optional[str] = None, **kwargs) -> str:
+    """
+    快速聊天接口 - 无需创建服务实例
+    
+    Args:
+        message: 用户消息
+        provider: 指定provider (kimi, openai, anthropic, ollama)
+        **kwargs: 其他参数
+    
+    Returns:
+        回复文本
+    """
+    service = get_llm_service()
+    
+    provider_type = None
+    if provider:
+        try:
+            provider_type = ModelType(provider.lower())
+        except ValueError:
+            pass
+    
+    return service.simple_chat(message, provider=provider_type, **kwargs)
 
 
 if __name__ == "__main__":
-    # 测试
-    config = {
-        "openai": {
-            "enabled": True,
-            "model": "gpt-4o-mini",
-            "api_key": os.getenv("OPENAI_API_KEY", "")
-        },
-        "ollama": {
-            "enabled": True,
-            "model": "llama3.2",
-            "base_url": "http://localhost:11434"
-        },
-        "routing": {
-            "simple": "ollama",
-            "moderate": "ollama",
-            "complex": "openai"
-        }
+    # 测试代码
+    print("Testing LLM Service...")
+    
+    # 测试Kimi
+    kimi_config = {
+        "enabled": True,
+        "model": "kimi-k2.5",
+        "api_key": os.getenv("KIMI_API_KEY", ""),
+        "temperature": 0.7,
+        "max_tokens": 1024
     }
     
-    service = LLMService(config)
-    
-    # 检查可用provider
-    print("可用Providers:")
-    for p in service.get_available_providers():
-        print(f"  - {p['type']}: {p['model']}")
-    
-    # 测试简单对话
-    print("\n测试简单对话:")
-    try:
-        response = service.chat("你好，请介绍一下自己", complexity=TaskComplexity.SIMPLE)
-        print(f"Provider: {response.model_type.value}")
+    kimi = KimiProvider(kimi_config)
+    if kimi.is_available():
+        print("✓ Kimi provider is available")
+        response = kimi.chat([Message(role="user", content="你好，请介绍一下自己")])
         print(f"Response: {response.content[:100]}...")
-    except Exception as e:
-        print(f"Error: {e}")
-    
-    # 测试复杂度分析
-    print("\n复杂度分析:")
-    test_queries = [
-        "你好",
-        "请解释量子计算的原理和应用",
-        "分析气候变化对全球经济的影响"
-    ]
-    for query in test_queries:
-        complexity = service.complexity_analyzer.analyze(query)
-        print(f"  '{query[:30]}...' -> {complexity.value}")
-    
-    # 统计
-    print("\n使用统计:")
-    print(service.get_stats())
+    else:
+        print("✗ Kimi provider not available (set KIMI_API_KEY)")
